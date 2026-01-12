@@ -1,0 +1,7 @@
+# 基础配置（最低配置）
+# 其他配置迁移到对应环境的配置文件中（application-dev.yml, application-docker.yml等）
+spring:
+  application:
+    name: match-engine-service
+  profiles:
+    active: dev

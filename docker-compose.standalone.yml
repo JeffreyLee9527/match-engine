@@ -1,0 +1,205 @@
+# ============================================
+# Spark Match Engine - 一键启动 Docker Compose 配置
+# ============================================
+# 特点：
+# 1. 所有配置硬编码，无需 .env 文件
+# 2. 使用 build 指令直接构建镜像，无需预先构建
+# 3. 包含所有基础设施和应用服务
+# 4. 配置从 MySQL 数据库读取（不再需要 Nacos）
+# 5. 使用Docker层缓存机制，自动缓存Maven依赖
+# 
+# 使用方法：
+#   docker-compose -f docker-compose.standalone.yml up -d --build
+# 
+# 说明：
+#   - 首次构建会下载依赖，后续构建会使用Docker层缓存，不会重复下载
+#   - 只要pom.xml不变，依赖下载层就会被缓存，大大加快构建速度
+#   - 无需额外配置，Docker自动处理缓存
+# 
+# 停止服务：
+#   docker-compose -f docker-compose.standalone.yml down
+# ============================================
+
+services:
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    container_name: spark-mysql-standalone
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=spark_match_engine
+      - MYSQL_USER=spark
+      - MYSQL_PASSWORD=spark
+      - TZ=Asia/Shanghai
+      - MYSQL_LOWER_CASE_TABLE_NAMES=1
+    volumes:
+      - mysql_data_standalone:/var/lib/mysql
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=1000
+      - --innodb_buffer_pool_size=512M
+    networks:
+      - spark-network-standalone
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper (Kafka依赖)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: spark-zookeeper-standalone
+    restart: unless-stopped
+    ports:
+      - "2181:2181"
+    environment:
+      - ZOOKEEPER_CLIENT_PORT=2181
+      - ZOOKEEPER_TICK_TIME=2000
+    volumes:
+      - zookeeper_data_standalone:/var/lib/zookeeper/data
+      - zookeeper_logs_standalone:/var/lib/zookeeper/log
+    networks:
+      - spark-network-standalone
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: spark-kafka-standalone
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_NUM_PARTITIONS=3
+      - KAFKA_LOG_RETENTION_HOURS=168
+      - KAFKA_LOG4J_ROOT_LOGLEVEL=WARN
+    volumes:
+      - kafka_data_standalone:/var/lib/kafka/data
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    networks:
+      - spark-network-standalone
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Nacos 已移除，配置现在从 MySQL 数据库读取
+
+  # 订单服务（直接构建）
+  order-service:
+    build:
+      context: .
+      dockerfile: order-service/Dockerfile
+    image: spark-match-engine/order-service:standalone
+    container_name: spark-order-service-standalone
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/spark_match_engine?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=spark
+      - SPRING_DATASOURCE_PASSWORD=spark
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - JAVA_OPTS=-Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+      - TZ=Asia/Shanghai
+    volumes:
+      - order_service_logs_standalone:/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - spark-network-standalone
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # 撮合引擎服务（直接构建）
+  match-engine-service:
+    build:
+      context: .
+      dockerfile: match-engine-service/Dockerfile
+    image: spark-match-engine/match-engine-service:standalone
+    container_name: spark-match-engine-service-standalone
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/spark_match_engine?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=spark
+      - SPRING_DATASOURCE_PASSWORD=spark
+      - WAL_BASE_PATH=/data/wal
+      - WAL_MAX_FILE_SIZE=104857600
+      - WAL_INSTANCE_ID=default
+      - SNAPSHOT_BASE_PATH=/data/snapshot
+      - SNAPSHOT_INTERVAL=300000
+      - MATCH_ENGINE_ORDERBOOK_UPDATE_DEPTH=5
+      - JAVA_OPTS=-Xms1g -Xmx4g -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+      - TZ=Asia/Shanghai
+    volumes:
+      - wal_data_standalone:/data/wal
+      - snapshot_data_standalone:/data/snapshot
+      - match_engine_logs_standalone:/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - spark-network-standalone
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8082/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  spark-network-standalone:
+    driver: bridge
+
+volumes:
+  mysql_data_standalone:
+    driver: local
+  zookeeper_data_standalone:
+    driver: local
+  zookeeper_logs_standalone:
+    driver: local
+  kafka_data_standalone:
+    driver: local
+  wal_data_standalone:
+    driver: local
+  snapshot_data_standalone:
+    driver: local
+  order_service_logs_standalone:
+    driver: local
+  match_engine_logs_standalone:
+    driver: local

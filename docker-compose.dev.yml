@@ -1,0 +1,184 @@
+# 开发环境Docker Compose配置
+# 适用于Windows 11本地开发，无需.env文件，直接运行: docker-compose -f docker-compose.dev.yml up -d
+# 所有配置已硬编码为开发环境默认值
+
+version: '3.8'
+
+services:
+  # MySQL数据库
+  mysql:
+    image: mysql:8.0
+    container_name: spark-mysql-dev
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=spark_match_engine
+      - MYSQL_USER=spark
+      - MYSQL_PASSWORD=spark
+      - TZ=Asia/Shanghai
+      - MYSQL_LOWER_CASE_TABLE_NAMES=1
+    volumes:
+      - mysql_data_dev:/var/lib/mysql
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=1000
+      - --innodb_buffer_pool_size=512M
+    networks:
+      - spark-network-dev
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper (Kafka依赖)
+  zookeeper:
+    image: bitnami/zookeeper:3.8
+    container_name: spark-zookeeper-dev
+    restart: unless-stopped
+    ports:
+      - "2181:2181"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+      - ZOO_SERVER_ID=1
+    volumes:
+      - zookeeper_data_dev:/bitnami/zookeeper
+    networks:
+      - spark-network-dev
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka
+  kafka:
+    image: bitnami/kafka:3.4
+    container_name: spark-kafka-dev
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_NUM_PARTITIONS=3
+      - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=1
+      - KAFKA_CFG_LOG_RETENTION_HOURS=168
+      - KAFKA_LOG4J_ROOT_LOGLEVEL=WARN
+    volumes:
+      - kafka_data_dev:/bitnami/kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    networks:
+      - spark-network-dev
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # 订单服务
+  order-service:
+    build:
+      context: .
+      dockerfile: order-service/Dockerfile
+    image: spark-match-engine/order-service:dev
+    container_name: spark-order-service-dev
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/spark_match_engine?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=spark
+      - SPRING_DATASOURCE_PASSWORD=spark
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - JAVA_OPTS=-Xms512m -Xmx2g -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+      - TZ=Asia/Shanghai
+    volumes:
+      - order_service_logs_dev:/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - spark-network-dev
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # 撮合引擎服务
+  match-engine-service:
+    build:
+      context: .
+      dockerfile: match-engine-service/Dockerfile
+    image: spark-match-engine/match-engine-service:dev
+    container_name: spark-match-engine-service-dev
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/spark_match_engine?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=spark
+      - SPRING_DATASOURCE_PASSWORD=spark
+      - WAL_BASE_PATH=/data/wal
+      - WAL_MAX_FILE_SIZE=104857600
+      - WAL_INSTANCE_ID=default
+      - SNAPSHOT_BASE_PATH=/data/snapshot
+      - SNAPSHOT_INTERVAL=300000
+      - MATCH_ENGINE_ORDERBOOK_UPDATE_DEPTH=5
+      - JAVA_OPTS=-Xms1g -Xmx4g -XX:+UseG1GC -XX:MaxGCPauseMillis=200
+      - TZ=Asia/Shanghai
+    volumes:
+      - wal_data_dev:/data/wal
+      - snapshot_data_dev:/data/snapshot
+      - match_engine_logs_dev:/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - spark-network-dev
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8082/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+networks:
+  spark-network-dev:
+    driver: bridge
+
+volumes:
+  mysql_data_dev:
+    driver: local
+  zookeeper_data_dev:
+    driver: local
+  kafka_data_dev:
+    driver: local
+  wal_data_dev:
+    driver: local
+  snapshot_data_dev:
+    driver: local
+  order_service_logs_dev:
+    driver: local
+  match_engine_logs_dev:
+    driver: local

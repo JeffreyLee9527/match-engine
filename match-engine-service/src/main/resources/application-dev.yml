@@ -1,0 +1,70 @@
+# 开发环境配置
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/spark_match_engine?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: root
+    password: root
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: match-engine-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+server:
+  port: 8082
+
+# Spring Boot Actuator配置
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+# WAL配置
+wal:
+  base-path: ./data/wal
+  max-file-size: 104857600  # 100MB
+  instance-id: ${HOSTNAME:default}
+
+# Snapshot配置
+snapshot:
+  base-path: ./data/snapshot
+  interval: 300000  # 5分钟
+
+# 撮合引擎配置
+match-engine:
+  orderbook:
+    update-depth: 5  # 订单簿更新深度
+
+# Disruptor配置
+disruptor:
+  # RingBuffer大小（必须是2的幂次方，默认4096）
+  # 配置建议：
+  # - 单生产单消费场景：4096-8192（推荐）
+  # - 高吞吐场景：8192-16384
+  # - 低延迟场景：1024-4096
+  # 内存估算：每个OrderEvent约300-400 bytes
+  # - 4096: ~1.5 MB
+  # - 8192: ~3 MB
+  buffer-size: 4096
+  # WaitStrategy类型：blocking（默认，推荐）、yielding、busy-spin
+  # - blocking: 阻塞等待，CPU占用低，适合单消费场景（推荐）
+  # - yielding: 让出CPU，延迟略高于blocking，CPU占用中等
+  # - busy-spin: 纯自旋，延迟最低但CPU占用100%，仅适合多消费者高吞吐场景
+  wait-strategy: blocking
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.spark.match: DEBUG
