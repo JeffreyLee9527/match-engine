@@ -7,9 +7,6 @@ FROM maven:3.9-eclipse-temurin-21 AS builder
 LABEL stage="builder"
 LABEL service.name="order-service"
 
-# 复制 Maven settings.xml（使用项目内的配置文件）
-COPY maven/settings.xml /usr/share/maven/conf/settings.xml
-
 # 设置工作目录
 WORKDIR /build
 
