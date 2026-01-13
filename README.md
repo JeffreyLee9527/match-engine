@@ -122,12 +122,13 @@ spark-match-engine/
 │   ├── snapshot/                # Snapshot快照
 │   └── recovery/                # 恢复服务
 │
-├── scripts/                     # 部署脚本
+├── scripts/                     # 脚本目录
 │   ├── build.sh                  # 构建脚本
 │   ├── docker-start-standalone.sh/bat  # 一键启动脚本（推荐）
 │   ├── docker-start.sh/bat      # 开发环境启动脚本
 │   ├── docker-stop.sh/bat       # 停止脚本
-│   └── ...
+│   └── test/                    # 测试脚本
+│       └── concurrent_test.py   # 订单服务并发压测脚本
 │
 ├── sql/                         # SQL脚本
 │   └── init.sql                 # 数据库初始化脚本
@@ -305,7 +306,7 @@ docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 - ✅ 技术栈说明
 - ✅ 快速开始指南
 - ✅ API使用示例
-- ✅ 测试运行方法
+- ✅ 性能测试脚本使用说明
 - ✅ 架构设计概述
 - ✅ 配置说明
 - ✅ 故障排查指南
@@ -354,6 +355,167 @@ GET /api/orderbook/{symbolId}?depth=10
 ```
 
 > **提示**: 详细API文档请参考项目文档（不在GitHub仓库中）
+
+---
+
+## 🧪 性能测试
+
+### 压测脚本说明
+
+项目提供了 `script/test/concurrent_test.py` 压测脚本，用于对订单服务进行并发压力测试。
+
+#### 前置要求
+
+- **Python 3.7+**
+- **aiohttp** 库（异步HTTP客户端）
+
+安装依赖：
+
+```bash
+pip install aiohttp
+```
+
+#### 使用方法
+
+**基本用法**：
+
+```bash
+python script/test/concurrent_test.py
+```
+
+**完整参数示例**：
+
+```bash
+python script/test/concurrent_test.py \
+    --url http://localhost:8081 \
+    --concurrency 10 \
+    --total 100 \
+    --test-type both \
+    --symbol BTCUSDT \
+    --user-id 1000000000000000001
+```
+
+#### 参数说明
+
+| 参数 | 说明 | 默认值 | 可选值 |
+|------|------|--------|--------|
+| `--url` | 订单服务地址 | `http://localhost:8081` | 任意HTTP地址 |
+| `--concurrency` | 并发数 | `10` | 正整数 |
+| `--total` | 总请求数 | `100` | 正整数 |
+| `--test-type` | 测试类型 | `both` | `place` / `cancel` / `both` |
+| `--symbol` | 交易对 | `BTCUSDT` | 已配置的交易对 |
+| `--user-id` | 用户ID | `1000000000000000001` | 正整数 |
+
+#### 测试类型说明
+
+- **`place`**: 仅测试下单接口
+- **`cancel`**: 仅测试撤单接口（会先创建测试订单）
+- **`both`**: 混合测试，同时测试下单和撤单接口
+
+#### 测试结果说明
+
+脚本会输出详细的测试统计信息：
+
+- **总请求数**: 执行的请求总数
+- **成功数/失败数**: 成功和失败的请求数量及百分比
+- **总耗时**: 测试总耗时（秒）
+- **QPS**: 每秒请求数（Queries Per Second）
+- **响应时间统计**: 
+  - 平均响应时间
+  - 最小/最大响应时间
+  - P50/P95/P99 百分位响应时间
+- **错误统计**: 各类错误的出现次数
+
+#### 使用示例
+
+**1. 快速测试（默认参数）**：
+
+```bash
+python script/test/concurrent_test.py
+```
+
+**2. 高并发下单测试**：
+
+```bash
+python script/test/concurrent_test.py \
+    --concurrency 50 \
+    --total 1000 \
+    --test-type place
+```
+
+**3. 撤单性能测试**：
+
+```bash
+python script/test/concurrent_test.py \
+    --concurrency 20 \
+    --total 500 \
+    --test-type cancel
+```
+
+**4. 混合压力测试**：
+
+```bash
+python script/test/concurrent_test.py \
+    --concurrency 100 \
+    --total 5000 \
+    --test-type both
+```
+
+**5. 测试不同交易对**：
+
+```bash
+python script/test/concurrent_test.py \
+    --symbol ETHUSDT \
+    --concurrency 20 \
+    --total 200
+```
+
+#### 注意事项
+
+1. **交易对配置**: 确保测试的交易对已在数据库中配置（通过 `sql/init.sql` 初始化）
+2. **服务状态**: 测试前确保订单服务和撮合引擎服务正常运行
+3. **并发数设置**: 建议根据服务器性能调整并发数，避免过高并发导致服务不可用
+4. **价格对齐**: 脚本会自动将价格对齐到交易对的 `tickSize`，确保价格符合交易规则
+5. **订单数量**: 撤单测试需要先有足够的订单，脚本会自动创建测试订单
+
+#### 测试输出示例
+
+```
+============================================================
+开始并发测试
+============================================================
+服务地址: http://localhost:8081
+并发数: 10
+总请求数: 100
+测试类型: both
+用户ID: 1000000000000000001
+交易对: BTCUSDT
+============================================================
+
+正在创建测试订单...
+成功创建 150 个订单
+
+============================================================
+测试结果统计
+============================================================
+总请求数: 100
+成功数: 98 (98.00%)
+失败数: 2 (2.00%)
+总耗时: 5.23 秒
+QPS: 19.12
+
+响应时间统计 (秒):
+  平均: 45.23 ms
+  最小: 12.34 ms
+  最大: 123.45 ms
+  P50:  42.10 ms
+  P95:  89.67 ms
+  P99:  112.34 ms
+
+错误统计:
+  HTTP 500: 2
+============================================================
+```
 
 ---
 
